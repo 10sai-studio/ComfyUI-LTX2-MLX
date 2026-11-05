@@ -34,6 +34,12 @@ def alive(pid: int) -> bool:
 
 
 class Stretch(unittest.TestCase):
+    def test_a_round_size_lands_on_the_grid(self):
+        self.assertEqual(stretch.on_the_grid(720), 704)
+        self.assertEqual(stretch.on_the_grid(1280), 1280)
+        self.assertEqual(stretch.on_the_grid(512), 512)
+        self.assertEqual(stretch.on_the_grid(10), 64)
+
     def test_frames_land_on_the_grid_and_never_short(self):
         self.assertEqual(stretch.frames_for(6.0, 24), 145)
         self.assertEqual(stretch.frames_for(4.0, 24), 97)
@@ -322,11 +328,21 @@ class Streamed(unittest.TestCase):
             self.module.streamed_call(tower, ids)
 
     def test_the_node_runs_this_file_and_not_the_programs_own_command(self):
-        argv = supervise.program("/venv/bin/python")
+        argv = supervise.program("/venv/bin/python", "a2v")
         self.assertEqual(argv[:2], ["/venv/bin/python", "-P"])
         self.assertTrue(Path(argv[2]).is_file())
         self.assertEqual(Path(argv[2]).name, "stream_text_encoder.py")
         self.assertEqual(argv[3:], ["a2v", "--distilled", "--low-ram"])
+
+    def test_text_and_picture_run_the_same_file_in_the_other_mode(self):
+        self.assertEqual(supervise.program("/venv/bin/python", "generate")[2:], [str(supervise.STREAMED_PROGRAM), "generate", "--distilled", "--low-ram"])
+
+    def test_every_mode_is_handed_the_same_clip(self):
+        argv = supervise.clip_arguments("/m", "a prompt", 97, 768, 512, 24, 42, "/out.mp4")
+        self.assertEqual(dict(zip(argv[::2], argv[1::2])), {
+            "--model": "/m", "--prompt": "a prompt", "--height": "512", "--width": "768",
+            "--frames": "97", "--frame-rate": "24", "--seed": "42", "--output": "/out.mp4",
+        })
 
 
 if __name__ == "__main__":

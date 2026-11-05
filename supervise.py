@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 GUARD = Path(__file__).with_name("guard.py")
+STREAMED_PROGRAM = Path(__file__).with_name("stream_text_encoder.py")
 GPU_TIMEOUT = "GPU Timeout"
 STOP_GRACE_SECONDS = 3.0
 POLL_SECONDS = 0.2
@@ -30,6 +31,11 @@ class GenerationFailed(RuntimeError):
 
 class MemoryStop(GenerationFailed):
     """The memory guard stopped it. Never retried: the same run would meet the same machine."""
+
+
+def program(python: str) -> list[str]:
+    """`-P` because running a script puts its folder first on the path, and this folder holds `nodes.py` and `tests`."""
+    return [python, "-P", str(STREAMED_PROGRAM), "a2v", "--distilled", "--low-ram"]
 
 
 @dataclass

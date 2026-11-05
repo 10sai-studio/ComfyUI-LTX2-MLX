@@ -33,12 +33,11 @@ def model_dir() -> Path:
     raise RuntimeError(f"{MODEL} is not installed: install the level again from the companion.")
 
 
-def executables() -> tuple[Path, Path]:
+def executable() -> Path:
     python = supervise.python_of(VENV)
-    command = VENV / "bin" / "ltx-2-mlx"
-    if not python.exists() or not command.exists():
+    if not python.exists():
         raise RuntimeError("The LTX-2.5 MLX environment is missing: install the level again from the companion.")
-    return python, command
+    return python
 
 
 def say(message: str) -> None:
@@ -46,7 +45,7 @@ def say(message: str) -> None:
 
 
 def free_memory() -> None:
-    # The child peaks at 15.8 GB on a 16 GB Mac, so whatever ComfyUI still holds comes straight out of that.
+    # On a 16 GB Mac, whatever ComfyUI still holds comes straight out of what the child has.
     model_management.unload_all_models()
     model_management.soft_empty_cache(True)
     gc.collect()
@@ -91,7 +90,7 @@ class LTX2MLXAudioToVideo:
         if refused:
             raise supervise.MemoryStop(f"Not started, to protect this Mac: {refused}. Close other programs and free some disk.")
         model = model_dir()
-        python, command = executables()
+        python = executable()
         tools = prepare_ffmpeg(python)
 
         temp = Path(folder_paths.get_temp_directory())
@@ -109,7 +108,7 @@ class LTX2MLXAudioToVideo:
         stretch.write_wav(track, stretch.fit_stretch(waveform, audio["sample_rate"], audio_start, frames, fps), audio["sample_rate"])
 
         argv = [
-            str(command), "a2v", "--distilled", "--low-ram",
+            *supervise.program(str(python)),
             "--model", str(model),
             "--prompt", prompt,
             "--audio", str(track),

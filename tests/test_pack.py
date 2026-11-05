@@ -1,12 +1,15 @@
 """Run with: python -m unittest discover tests. No ComfyUI, no GPU, numpy only."""
+import importlib.util
 import os
 import signal
 import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -242,6 +245,88 @@ class Lines(unittest.TestCase):
         self.assertNotIn("VIRTUAL_ENV", env)
         self.assertTrue(env["PATH"].startswith("/pack/bin"))
         self.assertEqual(env["HF_HUB_OFFLINE"], "1")
+
+
+class Tower:
+    """`mlx` does not run here, so the method meets numpy and a tower that writes down what happened to it."""
+
+    def __init__(self, events: list[str], layers: int = 3):
+        self.events = events
+        self.config = types.SimpleNamespace(layer_types=["sliding", "full", "sliding"][:layers], sliding_window=2)
+        self.embed_scale = 2.0
+        self.embed_tokens = lambda ids: np.ones((*ids.shape, 4), dtype=np.float32)
+        self._rotary_by_type = {"sliding": lambda _p: ("cos", "sin"), "full": lambda _p: ("cos", "sin")}
+        self.layers = [self.layer(index) for index in range(layers)]
+
+    def layer(self, index: int):
+        def run(hidden, _cos, _sin, _mask):
+            self.events.append(f"layer {index}")
+            return hidden + 1
+
+        return run
+
+
+class Streamed(unittest.TestCase):
+    def setUp(self):
+        self.events: list[str] = []
+        self.program = mock.Mock(return_value=0)
+        fake_mx = types.SimpleNamespace(
+            array=np.array, arange=np.arange, broadcast_to=np.broadcast_to,
+            eval=lambda _value: self.events.append("eval"), clear_cache=lambda: self.events.append("clear"),
+        )
+        self.gemma4 = types.SimpleNamespace(
+            _FULL_ATTENTION="full", _SLIDING_ATTENTION="sliding", build_attention_mask=lambda *_a, **_k: "mask",
+            Gemma4TextModel=type("Gemma4TextModel", (), {}),
+        )
+        modules = {
+            "mlx": types.ModuleType("mlx"),
+            "mlx.core": fake_mx,
+            "ltx_core_mlx": types.ModuleType("ltx_core_mlx"),
+            "ltx_core_mlx.text_encoders": types.ModuleType("ltx_core_mlx.text_encoders"),
+            "ltx_core_mlx.text_encoders.gemma": types.SimpleNamespace(gemma4=self.gemma4),
+            "ltx_pipelines_mlx": types.ModuleType("ltx_pipelines_mlx"),
+            "ltx_pipelines_mlx.cli": types.SimpleNamespace(main=self.program),
+        }
+        modules["mlx"].core = fake_mx
+        with mock.patch.dict(sys.modules, modules):
+            spec = importlib.util.spec_from_file_location("stream_text_encoder_under_test", supervise.STREAMED_PROGRAM)
+            self.module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(self.module)
+
+    def test_importing_it_does_not_run_the_program_or_replace_anything(self):
+        self.program.assert_not_called()
+        self.assertNotIn("__call__", vars(self.gemma4.Gemma4TextModel))
+        self.module.install()
+        self.assertIs(self.gemma4.Gemma4TextModel.__call__, self.module.streamed_call)
+
+    def test_every_state_comes_back_in_order(self):
+        states = self.module.streamed_call(Tower(self.events), np.zeros((1, 4), dtype=np.int32))
+        self.assertEqual(len(states), 4)
+        self.assertEqual([float(state[0, 0, 0]) for state in states], [2.0, 3.0, 4.0, 5.0])
+
+    def test_each_layer_is_evaluated_and_then_let_go(self):
+        tower = Tower(self.events)
+        self.module.streamed_call(tower, np.zeros((1, 4), dtype=np.int32))
+        self.assertEqual(tower.layers, [None, None, None])
+        self.assertIsNone(tower.embed_tokens)
+        self.assertEqual(
+            self.events,
+            ["eval", "clear", "layer 0", "eval", "clear", "layer 1", "eval", "clear", "layer 2", "eval", "clear"],
+        )
+
+    def test_a_second_call_says_why_it_cannot(self):
+        tower = Tower(self.events)
+        ids = np.zeros((1, 4), dtype=np.int32)
+        self.module.streamed_call(tower, ids)
+        with self.assertRaisesRegex(RuntimeError, "one process can encode one prompt"):
+            self.module.streamed_call(tower, ids)
+
+    def test_the_node_runs_this_file_and_not_the_programs_own_command(self):
+        argv = supervise.program("/venv/bin/python")
+        self.assertEqual(argv[:2], ["/venv/bin/python", "-P"])
+        self.assertTrue(Path(argv[2]).is_file())
+        self.assertEqual(Path(argv[2]).name, "stream_text_encoder.py")
+        self.assertEqual(argv[3:], ["a2v", "--distilled", "--low-ram"])
 
 
 if __name__ == "__main__":

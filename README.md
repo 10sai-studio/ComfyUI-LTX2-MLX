@@ -1,16 +1,30 @@
 # ComfyUI-LTX2-MLX
 
-A ComfyUI node that makes a clip around a given sound with [`ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx)
-(`a2v --distilled --low-ram`) on Apple Silicon: the sound stays as it is, and the mouth follows it. Written for
-[10sai](https://github.com/10sai-studio/10sai), which installs it, and it works on any ComfyUI that does the same.
+ComfyUI nodes that make LTX-2.5 clips with [`ltx-2-mlx`](https://github.com/dgrauet/ltx-2-mlx) on Apple Silicon, with
+`--distilled --low-ram`, in a process of their own:
 
-**Experimental.** On a Mac mini M6 with 16 GB and Chrome open and idle, three 6 s clips at 448x768 in a row took 202, 204
-and 235 s, starting from 64 to 76% of memory available and never under 15%. Nothing below 64% has been run.
+- **Around a given sound** (`a2v`): the sound stays as it is, and the mouth follows it.
+- **From text** and **from a picture** (`generate`, the second with `--image <file> 0 1.0`): the clip comes with its own sound.
+
+Written for [10sai](https://github.com/10sai-studio/10sai), which installs it, and it works on any ComfyUI that does the same.
+Width and height are snapped to multiples of 64, and the length to LTX's 8n+1 frames.
+
+**Experimental.** On a Mac mini M6 with 16 GB and Chrome open and idle:
+
+| Mode | Three clips in a row | Took | Memory available, lowest |
+|---|---|---|---|
+| Around a sound | 6 s at 448x768 | 202, 204, 235 s | 15% |
+| From text | 4, 6, 6 s at 832x512 | 152, 224, 223 s | 19% |
+| From a picture | 4, 6, 6 s at 832x512 | 163, 244, 243 s | 23% |
+
+Each run started from 62 to 76% available. The lowest point of the text runs was one 2 s sample at the first clip's load,
+under critical pressure; it went back to 49% in the next one. Swap grew by 1.3 GB over the three text clips and by 0.2 GB
+over the three picture clips. Nothing larger than 832x512, longer than 6 s or started below 62% has been run.
 
 **Gemma's tower is read one layer at a time.** `ltx-2-mlx` evaluates it in one lazy graph and `--low-ram` does not reach it,
 so the node runs `stream_text_encoder.py`, which replaces that one method and then calls the program. Alone at length 1024,
 the encoder went from a peak of 15.1 GB and 1% available to 7.5 GB and 18%. A clip with the same seed came out with the same
-frames and the same audio. One process can encode once, which is all distilled `a2v` does; a second call fails saying so.
+frames and the same audio. One process can encode once, which is all distilled `a2v` and `generate` do; a second call fails saying so.
 
 **The prompt has to ask for the mouth.** Over music, "relaxed face, head still" left it shut, and "lips and jaw moving
 clearly with the words" moved it, on one song, one seed and one face.

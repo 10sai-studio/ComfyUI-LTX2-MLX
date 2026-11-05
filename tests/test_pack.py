@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
+import memory_guard
 import stretch
 import supervise
 
@@ -102,6 +103,22 @@ class Children(unittest.TestCase):
             for pid in pids.read_text().split():
                 self.assertFalse(alive(int(pid)), f"{pid} survived")
 
+    def test_killing_only_the_guard_takes_the_rest_with_it(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pids = Path(folder) / "pids"
+            code = (
+                "import os, signal, subprocess, time\n"
+                "sub = subprocess.Popen(['sleep', '60'])\n"
+                f"open({str(pids)!r}, 'w').write(f'{{os.getpid()}} {{sub.pid}}')\n"
+                "os.kill(os.getppid(), signal.SIGKILL)\n"
+                "time.sleep(60)\n"
+            )
+            run = self.run_child(code)
+            self.assertLess(run.code, 0)
+            self.assertIn("killed from outside", supervise.describe_failure(run))
+            for pid in pids.read_text().split():
+                self.assertFalse(alive(int(pid)), f"{pid} survived")
+
     def test_a_dead_parent_leaves_nothing_running(self):
         with tempfile.TemporaryDirectory() as folder:
             pids = Path(folder) / "pids"
@@ -128,6 +145,79 @@ class Children(unittest.TestCase):
             while any(alive(pid) for pid in found) and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertFalse(any(alive(pid) for pid in found), "the child outlived its parent")
+
+
+GIB = memory_guard.GIB
+
+
+class Memory(unittest.TestCase):
+    def watch(self, readings, times):
+        readings, times = iter(readings), iter(times)
+        return memory_guard.Watch(lambda: next(readings), lambda: next(times))
+
+    def test_a_short_disk_or_a_heavy_swap_refuses_to_start(self):
+        self.assertIn("free disk", memory_guard.stop_reason_at_start(memory_guard.Reading(9 * GIB, 0, 1)))
+        self.assertIn("swap", memory_guard.stop_reason_at_start(memory_guard.Reading(50 * GIB, 13 * GIB, 1)))
+        self.assertIn("critical", memory_guard.stop_reason_at_start(memory_guard.Reading(50 * GIB, 0, 4)))
+        self.assertIn("available", memory_guard.stop_reason_at_start(memory_guard.Reading(50 * GIB, 0, 1, 20)))
+        self.assertIsNone(memory_guard.stop_reason_at_start(memory_guard.Reading(13 * GIB, 7 * GIB, 1)))
+
+    def test_what_a_normal_run_reached_does_not_stop_it(self):
+        # Measured: 14.8 GB of swap during prompt encoding, on a run that finished, with 13 GB of disk free at the start.
+        self.assertIsNone(self.watch([memory_guard.Reading(6 * GIB, int(14.8 * GIB), 2)], [0]).check())
+
+    def test_the_disk_and_the_swap_stop_it_at_once(self):
+        self.assertIn("disk", self.watch([memory_guard.Reading(4 * GIB, 0, 1)], [0]).check())
+        self.assertIn("swap", self.watch([memory_guard.Reading(50 * GIB, 21 * GIB, 1)], [0]).check())
+
+    def test_critical_pressure_has_to_last(self):
+        # Measured on a healthy run: two stretches of about 8 s each.
+        critical = memory_guard.Reading(50 * GIB, 0, memory_guard.CRITICAL)
+        normal = memory_guard.Reading(50 * GIB, 0, 1)
+        # A normal reading reads no clock, so three clock readings for four checks.
+        watch = self.watch([critical, normal, critical, critical], [0, 20, 50])
+        self.assertIsNone(watch.check())
+        self.assertIsNone(watch.check())
+        self.assertIsNone(watch.check())
+        self.assertIn("critical", watch.check())
+
+    def test_every_run_says_what_it_reached(self):
+        watch = self.watch([memory_guard.Reading(6 * GIB, 15 * GIB, 2)], [0])
+        watch.check()
+        self.assertEqual(watch.peak_line(), "Reached: swap 15.0 GB, lowest free disk 6.0 GB, worst pressure level 2.")
+
+    def test_the_swap_line_of_this_mac_is_read(self):
+        self.assertEqual(memory_guard.parse_swap("total = 16384.00M  used = 6814.75M  free = 9569.25M  (encrypted)"), int(6814.75 * 1024**2))
+
+    def test_this_machine_can_be_read(self):
+        reading = memory_guard.read_machine()
+        self.assertGreater(reading.free_disk, 0)
+        self.assertIn(reading.pressure, (1, 2, 4))
+        self.assertTrue(0 <= reading.available_percent <= 100)
+
+    def test_a_stop_kills_the_group_and_is_not_retried(self):
+        with tempfile.TemporaryDirectory() as folder:
+            pids = Path(folder) / "pids"
+            code = (
+                "import os, subprocess, time\n"
+                "sub = subprocess.Popen(['sleep', '60'])\n"
+                f"open({str(pids)!r}, 'w').write(f'{{os.getpid()}} {{sub.pid}}')\n"
+                "time.sleep(60)\n"
+            )
+            calls = []
+
+            def run():
+                calls.append(1)
+                return supervise.run_once(
+                    fake(code, folder), sys.executable, dict(os.environ), Path(folder) / "log", lambda: False,
+                    memory=lambda: "swap reached 21.0 GB" if pids.exists() and pids.stat().st_size > 0 else None,
+                )
+
+            with self.assertRaisesRegex(supervise.MemoryStop, "protect this Mac: swap reached"):
+                supervise.run_with_one_retry(run)
+            self.assertEqual(len(calls), 1)
+            for pid in pids.read_text().split():
+                self.assertFalse(alive(int(pid)), f"{pid} survived")
 
 
 class Lines(unittest.TestCase):

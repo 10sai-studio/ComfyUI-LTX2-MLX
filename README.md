@@ -9,6 +9,10 @@ A ComfyUI node that makes a clip around a given sound with [`ltx-2-mlx`](https:/
 **The prompt has to ask for the mouth.** Over music, "relaxed face, head still" left it shut, and "lips and jaw moving
 clearly with the words" moved it, on one song, one seed and one face.
 
+**A memory guard stops it before it takes the machine down.** It refuses to start with under 10 GB of free disk, over
+12 GB of swap, critical memory pressure or under 25% of memory available, and kills the run under 5 GB of free disk, over 20 GB of swap or after 30 s of
+critical pressure. Every run logs what it reached. The limits are not calibrated against a real crash yet.
+
 ## What it expects
 
 - `ltx-2-mlx` in `.venv` inside this folder, on its own environment and never ComfyUI's, with `imageio-ffmpeg`.

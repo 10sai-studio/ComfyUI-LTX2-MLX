@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import os
+import time
 import uuid
 from pathlib import Path
 
@@ -14,7 +15,7 @@ import comfy.utils
 from comfy_api.latest import InputImpl
 from PIL import Image
 
-from . import stretch, supervise
+from . import memory_guard, stretch, supervise
 
 PACK = Path(__file__).parent
 VENV = PACK / ".venv"
@@ -85,6 +86,10 @@ class LTX2MLXAudioToVideo:
     CATEGORY = "10sai/LTX-2.5 MLX"
 
     def generate(self, image, audio, prompt, duration, audio_start, width, height, fps, seed):
+        free_memory()
+        refused = memory_guard.stop_reason_at_start(memory_guard.read_machine())
+        if refused:
+            raise supervise.MemoryStop(f"Not started, to protect this Mac: {refused}. Close other programs and free some disk.")
         model = model_dir()
         python, command = executables()
         tools = prepare_ffmpeg(python)
@@ -122,9 +127,10 @@ class LTX2MLXAudioToVideo:
                 argv, str(python), env, log,
                 should_stop=model_management.processing_interrupted,
                 on_line=supervise.Progress(lambda percent: bar.update_absolute(percent, 100)),
+                memory=watch.check,
             )
 
-        free_memory()
+        watch = memory_guard.Watch(memory_guard.read_machine, time.monotonic)
         say(f"{frames} frames at {width}x{height}, {audio_start:.2f} s into the audio. Log: {log}")
         try:
             supervise.run_with_one_retry(attempt, say=say, before_retry=free_memory)
@@ -133,6 +139,7 @@ class LTX2MLXAudioToVideo:
             model_management.throw_exception_if_processing_interrupted()
             raise
         finally:
+            say(watch.peak_line())
             first_frame.unlink(missing_ok=True)
             track.unlink(missing_ok=True)
 

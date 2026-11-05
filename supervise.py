@@ -16,6 +16,7 @@ GUARD = Path(__file__).with_name("guard.py")
 GPU_TIMEOUT = "GPU Timeout"
 STOP_GRACE_SECONDS = 3.0
 POLL_SECONDS = 0.2
+GUARD_EVERY_SECONDS = 2.0
 TAIL_LINES = 200
 
 
@@ -25,6 +26,10 @@ class Cancelled(Exception):
 
 class GenerationFailed(RuntimeError):
     pass
+
+
+class MemoryStop(GenerationFailed):
+    """The memory guard stopped it. Never retried: the same run would meet the same machine."""
 
 
 @dataclass
@@ -65,8 +70,10 @@ def run_once(
     log: Path,
     should_stop: Callable[[], bool],
     on_line: Callable[[str], None] = lambda _line: None,
+    memory: Callable[[], Optional[str]] = lambda: None,
 ) -> Run:
-    """One attempt. `Cancelled` when `should_stop` said so, and only once the child has really gone."""
+    """One attempt. `Cancelled` when `should_stop` said so, `MemoryStop` when `memory` did, and only once the child has
+    really gone. Whatever ends it, nothing of the group outlives this: `kill` on just the guard would orphan the rest."""
     process = subprocess.Popen(
         [python, str(GUARD), *argv],
         stdin=subprocess.PIPE,
@@ -96,16 +103,21 @@ def run_once(
 
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
+    next_look = time.monotonic()
     try:
         while process.poll() is None:
             if should_stop():
-                kill_group(process)
                 raise Cancelled()
+            if time.monotonic() >= next_look:
+                next_look = time.monotonic() + GUARD_EVERY_SECONDS
+                reason = memory()
+                if reason:
+                    raise MemoryStop(
+                        f"Stopped to protect this Mac: {reason}. Close other programs and free some disk, then try again."
+                    )
             time.sleep(POLL_SECONDS)
-    except BaseException:
-        kill_group(process)
-        raise
     finally:
+        kill_group(process)
         reader.join(timeout=5)
         for pipe in (process.stdin, process.stdout):
             if pipe:
@@ -146,8 +158,8 @@ def describe_failure(run: Run) -> str:
     """What the child said last, without its progress bars."""
     said = [line for line in run.tail if "%|" not in line and not line.startswith("[estimate]")]
     last = said[-1] if said else "it said nothing"
-    if run.code in (137, 128 + 9):
-        return f"The generation was killed (exit {run.code}), which on a Mac usually means it ran out of memory. Last output: {last}"
+    if run.code < 0 or run.code == 128 + 9:
+        return f"The generation was killed from outside (exit {run.code}), which on a Mac usually means it ran out of memory. Last output: {last}"
     return f"The generation failed (exit {run.code}): {last}"
 
 

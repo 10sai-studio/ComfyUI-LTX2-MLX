@@ -33,9 +33,21 @@ class MemoryStop(GenerationFailed):
     """The memory guard stopped it. Never retried: the same run would meet the same machine."""
 
 
-def program(python: str) -> list[str]:
+def program(python: str, mode: str) -> list[str]:
     """`-P` because running a script puts its folder first on the path, and this folder holds `nodes.py` and `tests`."""
-    return [python, "-P", str(STREAMED_PROGRAM), "a2v", "--distilled", "--low-ram"]
+    return [python, "-P", str(STREAMED_PROGRAM), mode, "--distilled", "--low-ram"]
+
+
+def clip_arguments(model: str, prompt: str, frames: int, width: int, height: int, fps: int, seed: int, output: str) -> list[str]:
+    """What `a2v` and `generate` both take."""
+    return [
+        "--model", model,
+        "--prompt", prompt,
+        "--height", str(height), "--width", str(width),
+        "--frames", str(frames), "--frame-rate", str(fps),
+        "--seed", str(seed),
+        "--output", output,
+    ]
 
 
 @dataclass

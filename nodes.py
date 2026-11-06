@@ -1,4 +1,4 @@
-"""The ComfyUI node: a clip made around a given sound, by `ltx-2-mlx` in an environment of its own."""
+"""The ComfyUI nodes: a clip from text, from a picture or around a given sound, by `ltx-2-mlx` in an environment of its own."""
 from __future__ import annotations
 
 import gc
@@ -21,7 +21,7 @@ PACK = Path(__file__).parent
 VENV = PACK / ".venv"
 TOOLS = PACK / ".bin"
 FOLDER_KEY = "ltx-mlx"
-MODEL = "ltx-2.5-mlx-q4"
+MODEL = "ltx-2.5-mlx-q8"
 WEIGHT = "transformer-distilled.safetensors"
 
 
@@ -52,12 +52,130 @@ def free_memory() -> None:
 
 
 def check_output(path: Path) -> None:
-    """It exited 0, so now look at the file: a clip without its sound would defeat the whole point of this node."""
+    """It exited 0, so now look at the file: LTX-2.5's clips come with sound, and one without it is not the clip asked for."""
     if not path.exists() or path.stat().st_size == 0:
         raise RuntimeError("ltx-2-mlx finished and left no file.")
     with av.open(str(path)) as container:
         if not container.streams.video or not container.streams.audio:
             raise RuntimeError("ltx-2-mlx left a file without both video and audio.")
+
+
+def start() -> tuple[Path, Path, Path]:
+    """What every clip needs before it runs: the memory back from ComfyUI, the machine's yes, and the program."""
+    free_memory()
+    refused = memory_guard.stop_reason_at_start(memory_guard.read_machine())
+    if refused:
+        raise supervise.MemoryStop(f"Not started, to protect this Mac: {refused}. Close other programs and free some disk.")
+    model = model_dir()
+    python = executable()
+    return model, python, prepare_ffmpeg(python)
+
+
+def files_for_this_run() -> tuple[Path, str]:
+    temp = Path(folder_paths.get_temp_directory())
+    temp.mkdir(parents=True, exist_ok=True)
+    return temp, f"ltx2mlx-{uuid.uuid4().hex[:12]}"
+
+
+def save_first_frame(image, path: Path) -> None:
+    Image.fromarray((image[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)).save(path)
+
+
+def run_clip(argv: list[str], python: Path, tools: Path, output: Path, log: Path, inputs: list[Path]) -> tuple:
+    """Runs the program under the guard, and whatever happens leaves nothing behind but the clip it made."""
+    env = supervise.child_environment(dict(os.environ), [VENV / "bin", tools])
+    bar = comfy.utils.ProgressBar(100)
+    watch = memory_guard.Watch(memory_guard.read_machine, time.monotonic)
+
+    def attempt() -> supervise.Run:
+        return supervise.run_once(
+            argv, str(python), env, log,
+            should_stop=model_management.processing_interrupted,
+            on_line=supervise.Progress(lambda percent: bar.update_absolute(percent, 100)),
+            memory=watch.check,
+        )
+
+    try:
+        supervise.run_with_one_retry(attempt, say=say, before_retry=free_memory)
+    except supervise.Cancelled:
+        say("Cancelled, and the child is gone.")
+        model_management.throw_exception_if_processing_interrupted()
+        raise
+    finally:
+        say(watch.peak_line())
+        for path in inputs:
+            path.unlink(missing_ok=True)
+
+    check_output(output)
+    log.unlink(missing_ok=True)
+    bar.update_absolute(100, 100)
+    return (InputImpl.VideoFromFile(str(output)),)
+
+
+def clip_inputs() -> dict:
+    """The controls every clip has."""
+    return {
+        "prompt": ("STRING", {"multiline": True, "default": ""}),
+        "duration": ("FLOAT", {"default": 4.0, "min": 0.5, "max": 20.0, "step": 0.01}),
+        "width": ("INT", {"default": 768, "min": 64, "max": 1920, "step": 64}),
+        "height": ("INT", {"default": 512, "min": 64, "max": 1920, "step": 64}),
+        "fps": ("INT", {"default": 24, "min": 8, "max": 60}),
+        "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True}),
+    }
+
+
+def generate_clip(prompt, duration, width, height, fps, seed, image=None) -> tuple:
+    """`ltx-2-mlx generate`: from text, or from a picture when there is one."""
+    model, python, tools = start()
+    temp, run = files_for_this_run()
+    output = temp / f"{run}.mp4"
+    log = temp / f"{run}.log"
+    width, height = stretch.on_the_grid(width), stretch.on_the_grid(height)
+    frames = stretch.frames_for(duration, fps)
+    argv = [
+        *supervise.program(str(python), "generate"),
+        *supervise.clip_arguments(str(model), prompt, frames, width, height, fps, seed, str(output)),
+    ]
+    inputs = []
+    if image is not None:
+        first_frame = temp / f"{run}.png"
+        save_first_frame(image, first_frame)
+        inputs.append(first_frame)
+        argv += ["--image", str(first_frame), "0", "1.0"]
+    say(f"{frames} frames at {width}x{height}, {'from a picture' if inputs else 'from text'}. Log: {log}")
+    return run_clip(argv, python, tools, output, log, inputs)
+
+
+class LTX2MLXTextToVideo:
+    """A prompt in, a clip with its sound out."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": clip_inputs()}
+
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    FUNCTION = "generate"
+    CATEGORY = "10sai/LTX-2.5 MLX"
+
+    def generate(self, prompt, duration, width, height, fps, seed):
+        return generate_clip(prompt, duration, width, height, fps, seed)
+
+
+class LTX2MLXImageToVideo:
+    """A picture and a prompt in, a clip with its sound out that starts on that picture."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"image": ("IMAGE",), **clip_inputs()}}
+
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    FUNCTION = "generate"
+    CATEGORY = "10sai/LTX-2.5 MLX"
+
+    def generate(self, image, prompt, duration, width, height, fps, seed):
+        return generate_clip(prompt, duration, width, height, fps, seed, image=image)
 
 
 class LTX2MLXAudioToVideo:
@@ -85,67 +203,27 @@ class LTX2MLXAudioToVideo:
     CATEGORY = "10sai/LTX-2.5 MLX"
 
     def generate(self, image, audio, prompt, duration, audio_start, width, height, fps, seed):
-        free_memory()
-        refused = memory_guard.stop_reason_at_start(memory_guard.read_machine())
-        if refused:
-            raise supervise.MemoryStop(f"Not started, to protect this Mac: {refused}. Close other programs and free some disk.")
-        model = model_dir()
-        python = executable()
-        tools = prepare_ffmpeg(python)
+        model, python, tools = start()
+        temp, run = files_for_this_run()
+        first_frame = temp / f"{run}.png"
+        track = temp / f"{run}.wav"
+        output = temp / f"{run}.mp4"
+        log = temp / f"{run}.log"
 
-        temp = Path(folder_paths.get_temp_directory())
-        temp.mkdir(parents=True, exist_ok=True)
-        run_id = uuid.uuid4().hex[:12]
-        first_frame = temp / f"ltx2mlx-{run_id}.png"
-        track = temp / f"ltx2mlx-{run_id}.wav"
-        output = temp / f"ltx2mlx-{run_id}.mp4"
-        log = temp / f"ltx2mlx-{run_id}.log"
-
-        Image.fromarray((image[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)).save(first_frame)
+        save_first_frame(image, first_frame)
 
         frames = stretch.frames_for(duration, fps)
         waveform = audio["waveform"][0].cpu().numpy()
         stretch.write_wav(track, stretch.fit_stretch(waveform, audio["sample_rate"], audio_start, frames, fps), audio["sample_rate"])
 
         argv = [
-            *supervise.program(str(python)),
-            "--model", str(model),
-            "--prompt", prompt,
+            *supervise.program(str(python), "a2v"),
+            *supervise.clip_arguments(str(model), prompt, frames, width, height, fps, seed, str(output)),
             "--audio", str(track),
             "--image", str(first_frame),
-            "--height", str(height), "--width", str(width),
-            "--frames", str(frames), "--frame-rate", str(fps),
-            "--seed", str(seed),
-            "--output", str(output),
         ]
-        env = supervise.child_environment(dict(os.environ), [VENV / "bin", tools])
-        bar = comfy.utils.ProgressBar(100)
-
-        def attempt() -> supervise.Run:
-            return supervise.run_once(
-                argv, str(python), env, log,
-                should_stop=model_management.processing_interrupted,
-                on_line=supervise.Progress(lambda percent: bar.update_absolute(percent, 100)),
-                memory=watch.check,
-            )
-
-        watch = memory_guard.Watch(memory_guard.read_machine, time.monotonic)
         say(f"{frames} frames at {width}x{height}, {audio_start:.2f} s into the audio. Log: {log}")
-        try:
-            supervise.run_with_one_retry(attempt, say=say, before_retry=free_memory)
-        except supervise.Cancelled:
-            say("Cancelled, and the child is gone.")
-            model_management.throw_exception_if_processing_interrupted()
-            raise
-        finally:
-            say(watch.peak_line())
-            first_frame.unlink(missing_ok=True)
-            track.unlink(missing_ok=True)
-
-        check_output(output)
-        log.unlink(missing_ok=True)
-        bar.update_absolute(100, 100)
-        return (InputImpl.VideoFromFile(str(output)),)
+        return run_clip(argv, python, tools, output, log, [first_frame, track])
 
 
 def prepare_ffmpeg(python: Path) -> Path:
@@ -168,5 +246,13 @@ def prepare_ffmpeg(python: Path) -> Path:
     return TOOLS
 
 
-NODE_CLASS_MAPPINGS = {"LTX2MLXAudioToVideo": LTX2MLXAudioToVideo}
-NODE_DISPLAY_NAME_MAPPINGS = {"LTX2MLXAudioToVideo": "LTX-2.5 audio to video (MLX)"}
+NODE_CLASS_MAPPINGS = {
+    "LTX2MLXTextToVideo": LTX2MLXTextToVideo,
+    "LTX2MLXImageToVideo": LTX2MLXImageToVideo,
+    "LTX2MLXAudioToVideo": LTX2MLXAudioToVideo,
+}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "LTX2MLXTextToVideo": "LTX-2.5 text to video (MLX)",
+    "LTX2MLXImageToVideo": "LTX-2.5 image to video (MLX)",
+    "LTX2MLXAudioToVideo": "LTX-2.5 audio to video (MLX)",
+}

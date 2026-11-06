@@ -13,6 +13,14 @@ import numpy as np
 LATENT_SECONDS = 0.04
 
 
+def on_the_grid(side: int) -> int:
+    """The nearest size `ltx-2-mlx` takes. The first pass runs at half size on a latent of 32 px, so sides move in 64s.
+
+    A caller asks for round numbers: 720p is 1280x720, and 720 is off this grid.
+    """
+    return max(64, round(side / 64) * 64)
+
+
 def frames_for(seconds: float, fps: float) -> int:
     """The shortest length on LTX's 8n+1 grid that covers `seconds`. A clip is never shorter than what was asked."""
     return max(1, math.ceil((seconds * fps - 1) / 8)) * 8 + 1

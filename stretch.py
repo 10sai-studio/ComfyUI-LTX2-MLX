@@ -21,6 +21,21 @@ def on_the_grid(side: int) -> int:
     return max(64, round(side / 64) * 64)
 
 
+def edit_size(clip_width: int, clip_height: int, short_side: int) -> tuple[int, int]:
+    """The clip's aspect with its shorter side at `short_side`, on the grid: a vertical clip stays vertical."""
+    scale = short_side / min(clip_width, clip_height)
+    return on_the_grid(round(clip_width * scale)), on_the_grid(round(clip_height * scale))
+
+
+def edit_frames(seconds: float, fps: float, clip_frames: int) -> int:
+    """How long an edit is, on the 8n+1 grid: what was asked, never more than the clip has.
+
+    The CUDA level's own expression, so both edit the same span: the guide is the edited frame and then the clip's
+    frames up to one short of this, so a clip of 8n frames still fills 8n+1.
+    """
+    return min(math.floor(seconds * fps / 8) * 8 + 1, math.floor(clip_frames / 8) * 8 + 1)
+
+
 def frames_for(seconds: float, fps: float) -> int:
     """The shortest length on LTX's 8n+1 grid that covers `seconds`. A clip is never shorter than what was asked."""
     return max(1, math.ceil((seconds * fps - 1) / 8)) * 8 + 1

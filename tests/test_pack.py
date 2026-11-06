@@ -46,6 +46,18 @@ class Stretch(unittest.TestCase):
         self.assertEqual(stretch.frames_for(6.04, 24), 145)
         self.assertEqual(stretch.frames_for(6.05, 24), 153)
 
+    def test_an_edit_keeps_the_clips_aspect_at_the_shorter_side(self):
+        self.assertEqual(stretch.edit_size(1920, 1080, 512), (896, 512))
+        self.assertEqual(stretch.edit_size(1080, 1920, 512), (512, 896))
+        self.assertEqual(stretch.edit_size(832, 512, 512), (832, 512))
+
+    def test_an_edit_is_what_was_asked_and_never_longer_than_the_clip(self):
+        self.assertEqual(stretch.edit_frames(4, 24, 97), 97)
+        self.assertEqual(stretch.edit_frames(4, 30, 240), 121)
+        self.assertEqual(stretch.edit_frames(4, 24, 60), 57)
+        # 8n frames still fill 8n+1: the guide is the edited frame and then n*8 of the clip's.
+        self.assertEqual(stretch.edit_frames(4, 24, 96), 97)
+
     def test_a_short_track_is_padded_with_silence(self):
         out = stretch.fit_stretch(np.ones((2, int(5.98 * 48000)), dtype=np.float32), 48000, 0, 145, 24)
         self.assertGreaterEqual(out.shape[1], int((145 / 24 + stretch.LATENT_SECONDS) * 48000))
@@ -336,6 +348,9 @@ class Streamed(unittest.TestCase):
 
     def test_text_and_picture_run_the_same_file_in_the_other_mode(self):
         self.assertEqual(supervise.program("/venv/bin/python", "generate")[2:], [str(supervise.STREAMED_PROGRAM), "generate", "--distilled", "--low-ram"])
+
+    def test_an_edit_runs_ic_lora_without_the_flag_it_refuses(self):
+        self.assertEqual(supervise.program("/venv/bin/python", "ic-lora")[3:], ["ic-lora", "--low-ram"])
 
     def test_every_mode_is_handed_the_same_clip(self):
         argv = supervise.clip_arguments("/m", "a prompt", 97, 768, 512, 24, 42, "/out.mp4")

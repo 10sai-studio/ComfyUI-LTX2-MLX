@@ -4,7 +4,9 @@ The tower is 9.8 GB and the program evaluates it in one lazy graph, so all of it
 connector. On 16 GB with a browser open that reached 1% available in 7 s. `--low-ram` streams the transformer and nothing
 streams this, so the method is replaced here rather than forking a program pinned by its lockfile.
 """
+import importlib.util
 import sys
+from pathlib import Path
 
 import mlx.core as mx
 from ltx_core_mlx.text_encoders.gemma import gemma4
@@ -47,7 +49,16 @@ def install() -> None:
     gemma4.Gemma4TextModel.__call__ = streamed_call
 
 
+def install_guide() -> None:
+    """`guide.py`, loaded by path: `-P` keeps this folder off the path, which is the point of it."""
+    spec = importlib.util.spec_from_file_location("guide", Path(__file__).with_name("guide.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.install()
+
+
 if __name__ == "__main__":
     install()
+    install_guide()
     sys.argv = ["ltx-2-mlx", *sys.argv[1:]]
     sys.exit(program())

@@ -9,17 +9,16 @@ ComfyUI nodes that make LTX-2.5 clips with [`ltx-2-mlx`](https://github.com/dgra
 Written for [10sai](https://github.com/10sai-studio/10sai), which installs it, and it works on any ComfyUI that does the same.
 Width and height are snapped to multiples of 64, and the length to LTX's 8n+1 frames.
 
-**Experimental.** On a Mac mini M6 with 16 GB and Chrome open and idle:
+**Experimental.** On a Mac mini M6 with 16 GB and Chrome open and idle, with the 8-bit pack:
 
 | Mode | Three clips in a row | Took | Memory available, lowest |
 |---|---|---|---|
-| Around a sound | 6 s at 448x768 | 202, 204, 235 s | 15% |
-| From text | 4, 6, 6 s at 832x512 | 152, 224, 223 s | 19% |
-| From a picture | 4, 6, 6 s at 832x512 | 163, 244, 243 s | 23% |
+| Around a sound | 6 s at 448x768 | 214, 214, 214 s | 31% |
+| From text | 4, 6, 6 s at 832x512 | 173, 244, 244 s | 26% |
+| From a picture | 4, 6, 6 s at 832x512 | 183, 254, 254 s | 26% |
 
-Each run started from 62 to 76% available. The lowest point of the text runs was one 2 s sample at the first clip's load,
-under critical pressure; it went back to 49% in the next one. Swap grew by 1.3 GB over the three text clips and by 0.2 GB
-over the three picture clips. Nothing larger than 832x512, longer than 6 s or started below 62% has been run.
+Each run started from 70 to 76% available, and swap grew by 0.3 GB at most. With the int4 pack the same runs were about
+10% faster and went down to 15-23%. Nothing larger than 832x512, longer than 6 s or started below 62% has been run.
 
 **Gemma's tower is read one layer at a time.** `ltx-2-mlx` evaluates it in one lazy graph and `--low-ram` does not reach it,
 so the node runs `stream_text_encoder.py`, which replaces that one method and then calls the program. Alone at length 1024,

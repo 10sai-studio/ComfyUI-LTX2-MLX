@@ -1,8 +1,10 @@
-"""The ComfyUI nodes: a clip from text, from a picture or around a given sound, by `ltx-2-mlx` in an environment of its own."""
+"""The ComfyUI nodes: a clip from text, from a picture or around a given sound, and a clip edited from its first frame, by
+`ltx-2-mlx` in an environment of its own."""
 from __future__ import annotations
 
 import gc
 import os
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +25,12 @@ TOOLS = PACK / ".bin"
 FOLDER_KEY = "ltx-mlx"
 MODEL = "ltx-2.5-mlx-q8"
 WEIGHT = "transformer-distilled.safetensors"
+# WepeNerd/LTX-Ripple's own workflow: its strength, and its prompt, which the person's description is appended to.
+RIPPLE_STRENGTH = 1.35
+RIPPLE_PROMPT = (
+    "Use the reference video for motion, timing, camera movement, composition, and unchanged scene content, while "
+    "consistently propagating the visual edit established in the first frame throughout the video."
+)
 
 
 def model_dir() -> Path:
@@ -226,6 +234,112 @@ class LTX2MLXAudioToVideo:
         return run_clip(argv, python, tools, output, log, [first_frame, track])
 
 
+def fitted(picture: Image.Image, width: int, height: int) -> Image.Image:
+    """ComfyUI's `ImageScale` with `lanczos` and `center`, as the CUDA level scales: cut to the aspect, then resize."""
+    aspect = width / height
+    w, h = picture.size
+    if w / h > aspect:
+        cut = round(h * aspect)
+        picture = picture.crop(((w - cut) // 2, 0, (w - cut) // 2 + cut, h))
+    elif w / h < aspect:
+        cut = round(w / aspect)
+        picture = picture.crop((0, (h - cut) // 2, w, (h - cut) // 2 + cut))
+    return picture.resize((width, height), Image.Resampling.LANCZOS)
+
+
+def clip_frames(video, count: int):
+    """The clip's first `count` frames from where its trim starts, decoded one at a time rather than all at once."""
+    start, _ = video.get_active_trim_window()
+    with av.open(video.get_stream_source()) as container:
+        stream = container.streams.video[0]
+        for frame in container.decode(stream):
+            if frame.time is not None and frame.time < start:
+                continue
+            yield frame.to_image()
+            count -= 1
+            if count == 0:
+                return
+
+
+def write_guide(first_frame, video, frames: int, width: int, height: int, fps: float, path: Path, tools: Path) -> None:
+    """The edited frame, then the clip's frames 0 to `frames - 2`, losslessly: the guide `ic-lora` encodes."""
+    first = Image.fromarray((first_frame[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8))
+    encoder = subprocess.Popen(
+        [str(tools / "ffmpeg"), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
+         "-r", f"{fps}", "-i", "-", "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(path)],
+        stdin=subprocess.PIPE,
+    )
+    written = 0
+    try:
+        for picture in (first, *clip_frames(video, frames - 1)):
+            encoder.stdin.write(fitted(picture.convert("RGB"), width, height).tobytes())
+            written += 1
+    finally:
+        encoder.stdin.close()
+        encoder.wait()
+    if encoder.returncode != 0 or written != frames:
+        raise RuntimeError(f"The guide came out with {written} of {frames} frames.")
+
+
+def without_sound(made: Path, muted: Path, tools: Path) -> None:
+    """`ic-lora` invents a track; the CUDA level returns none, so the clip keeps its own wherever it is used."""
+    subprocess.run([str(tools / "ffmpeg"), "-v", "error", "-y", "-i", str(made), "-an", "-c:v", "copy", str(muted)], check=True)
+    made.unlink(missing_ok=True)
+
+
+class LTX2MLXRippleEdit:
+    """A clip and its first frame with an edit on it in; the same clip out, with the edit carried through it."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "reference_video": ("VIDEO",),
+                "first_frame": ("IMAGE",),
+                # Picked like `LoraLoaderModelOnly` picks it, so the canvas names the weight it loads.
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "duration": ("INT", {"default": 4, "min": 1, "max": 4}),
+                "height": ("INT", {"default": 512, "min": 64, "max": 1920, "step": 64, "tooltip": "The shorter side."}),
+                "seed": ("INT", {"default": 132644, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True}),
+            }
+        }
+
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    FUNCTION = "edit"
+    CATEGORY = "10sai/LTX-2.5 MLX"
+
+    def edit(self, reference_video, first_frame, lora_name, prompt, duration, height, seed):
+        lora = folder_paths.get_full_path("loras", lora_name)
+        if not lora:
+            raise RuntimeError(f"{lora_name} is not installed: install the level again from the companion.")
+        model, python, tools = start()
+        temp, run = files_for_this_run()
+        guide = temp / f"{run}-guide.mp4"
+        made = temp / f"{run}-made.mp4"
+        output = temp / f"{run}.mp4"
+        log = temp / f"{run}.log"
+
+        fps = float(reference_video.get_frame_rate())
+        width, height = stretch.edit_size(*reference_video.get_dimensions(), height)
+        frames = stretch.edit_frames(duration, fps, reference_video.get_frame_count())
+        write_guide(first_frame, reference_video, frames, width, height, fps, guide, tools)
+
+        described = f"{RIPPLE_PROMPT} {prompt.strip()}".strip()
+        argv = [
+            *supervise.program(str(python), "ic-lora"),
+            *supervise.clip_arguments(str(model), described, frames, width, height, fps, seed, str(made)),
+            "--single-stage",
+            "--lora", lora, str(RIPPLE_STRENGTH),
+            "--video-conditioning", str(guide), "1.0",
+        ]
+        say(f"{frames} frames at {width}x{height}, {fps:g} fps, edited from the first frame. Log: {log}")
+        run_clip(argv, python, tools, made, log, [guide])
+        without_sound(made, output, tools)
+        return (InputImpl.VideoFromFile(str(output)),)
+
+
 def prepare_ffmpeg(python: Path) -> Path:
     """`ltx-2-mlx` looks for `ffmpeg` on PATH and hard-codes libx264, which a Mac does not come with.
 
@@ -250,9 +364,11 @@ NODE_CLASS_MAPPINGS = {
     "LTX2MLXTextToVideo": LTX2MLXTextToVideo,
     "LTX2MLXImageToVideo": LTX2MLXImageToVideo,
     "LTX2MLXAudioToVideo": LTX2MLXAudioToVideo,
+    "LTX2MLXRippleEdit": LTX2MLXRippleEdit,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LTX2MLXTextToVideo": "LTX-2.5 text to video (MLX)",
     "LTX2MLXImageToVideo": "LTX-2.5 image to video (MLX)",
     "LTX2MLXAudioToVideo": "LTX-2.5 audio to video (MLX)",
+    "LTX2MLXRippleEdit": "LTX-2.5 Ripple edit from the first frame (MLX)",
 }

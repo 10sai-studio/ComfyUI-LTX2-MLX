@@ -36,7 +36,7 @@ critical pressure. Every run logs what it reached. The limits are not calibrated
 ## What it expects
 
 - `ltx-2-mlx` in `.venv` inside this folder, on its own environment and never ComfyUI's, with `imageio-ffmpeg`.
-- The int4 pack (`dgrauet/ltx-2.5-mlx-q4`) at `<models>/ltx-mlx/ltx-2.5-mlx-q4`.
+- The 8-bit pack (`dgrauet/ltx-2.5-mlx-q8`) at `<models>/ltx-mlx/ltx-2.5-mlx-q8`, 42 GiB.
 
 `prove_environment.py` checks that the machine can run it, and that the pinned program still gives the same numbers through
 the replaced method, on a tiny tower. `python -m unittest discover tests` needs numpy only.

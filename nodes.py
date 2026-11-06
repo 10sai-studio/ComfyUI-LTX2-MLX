@@ -21,7 +21,7 @@ PACK = Path(__file__).parent
 VENV = PACK / ".venv"
 TOOLS = PACK / ".bin"
 FOLDER_KEY = "ltx-mlx"
-MODEL = "ltx-2.5-mlx-q4"
+MODEL = "ltx-2.5-mlx-q8"
 WEIGHT = "transformer-distilled.safetensors"
 
 

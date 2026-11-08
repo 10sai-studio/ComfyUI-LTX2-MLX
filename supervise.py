@@ -54,6 +54,18 @@ def clip_arguments(model: str, prompt: str, frames: int, width: int, height: int
     ]
 
 
+
+def reference_arguments(lora: str, guide: str, guide_strength: float, first_frame: Optional[str], first_strength: float) -> list[str]:
+    """`ic-lora` following a reference: one pass at full size, the LoRA at 1.0, the guide, and the first frame if any.
+
+    Single stage because the two-stage path loads `spatial_upscaler_x2_v1_1` and the 2.5 pack ships `v1_0`. The union
+    control LoRA's metadata says `reference_downscale_factor: 2`, so the guide is encoded at half size.
+    """
+    argv = ["--single-stage", "--lora", lora, "1.0", "--video-conditioning", guide, f"{guide_strength:g}"]
+    if first_frame is not None:
+        argv += ["--image", first_frame, "0", f"{first_strength:g}"]
+    return argv
+
 @dataclass
 class Run:
     code: int

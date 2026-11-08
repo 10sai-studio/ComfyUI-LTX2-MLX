@@ -36,6 +36,14 @@ def edit_frames(seconds: float, fps: float, clip_frames: int) -> int:
     return min(math.floor(seconds * fps / 8) * 8 + 1, math.floor(clip_frames / 8) * 8 + 1)
 
 
+def reference_frames(seconds: float, fps: float, guide_frames: int) -> int:
+    """How long a clip that follows a reference is, on the 8n+1 grid: what was asked, never more than the guide has.
+
+    Unlike an edit, nothing is put in front of the guide, so its own frames have to cover the clip.
+    """
+    return max(1, min(math.floor(seconds * fps / 8) * 8 + 1, math.floor((guide_frames - 1) / 8) * 8 + 1))
+
+
 def frames_for(seconds: float, fps: float) -> int:
     """The shortest length on LTX's 8n+1 grid that covers `seconds`. A clip is never shorter than what was asked."""
     return max(1, math.ceil((seconds * fps - 1) / 8)) * 8 + 1

@@ -58,6 +58,13 @@ class Stretch(unittest.TestCase):
         # 8n frames still fill 8n+1: the guide is the edited frame and then n*8 of the clip's.
         self.assertEqual(stretch.edit_frames(4, 24, 96), 97)
 
+    def test_a_reference_clip_is_what_was_asked_and_never_longer_than_its_guide(self):
+        self.assertEqual(stretch.reference_frames(4, 24, 97), 97)
+        self.assertEqual(stretch.reference_frames(4, 24, 240), 97)
+        # Nothing goes in front of the guide, so 96 frames make 89, not 97 as an edit would.
+        self.assertEqual(stretch.reference_frames(4, 24, 96), 89)
+        self.assertEqual(stretch.reference_frames(4, 24, 1), 1)
+
     def test_a_short_track_is_padded_with_silence(self):
         out = stretch.fit_stretch(np.ones((2, int(5.98 * 48000)), dtype=np.float32), 48000, 0, 145, 24)
         self.assertGreaterEqual(out.shape[1], int((145 / 24 + stretch.LATENT_SECONDS) * 48000))
@@ -351,6 +358,12 @@ class Streamed(unittest.TestCase):
 
     def test_an_edit_runs_ic_lora_without_the_flag_it_refuses(self):
         self.assertEqual(supervise.program("/venv/bin/python", "ic-lora")[3:], ["ic-lora", "--low-ram"])
+
+    def test_a_reference_runs_one_pass_with_its_guide_and_first_frame(self):
+        argv = supervise.reference_arguments("/l.safetensors", "/g.mp4", 0.5, "/f.png", 0.7)
+        self.assertEqual(argv, ["--single-stage", "--lora", "/l.safetensors", "1.0", "--video-conditioning", "/g.mp4", "0.5",
+                                "--image", "/f.png", "0", "0.7"])
+        self.assertNotIn("--image", supervise.reference_arguments("/l.safetensors", "/g.mp4", 0.5, None, 0.7))
 
     def test_every_mode_is_handed_the_same_clip(self):
         argv = supervise.clip_arguments("/m", "a prompt", 97, 768, 512, 24, 42, "/out.mp4")

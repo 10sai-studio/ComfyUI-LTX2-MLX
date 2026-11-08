@@ -1,5 +1,5 @@
-"""The ComfyUI nodes: a clip from text, from a picture or around a given sound, and a clip edited from its first frame, by
-`ltx-2-mlx` in an environment of its own."""
+"""The ComfyUI nodes: a clip from text, from a picture or around a given sound, a clip edited from its first frame, and a
+clip that follows a reference, by `ltx-2-mlx` in an environment of its own."""
 from __future__ import annotations
 
 import gc
@@ -30,6 +30,13 @@ RIPPLE_STRENGTH = 1.35
 RIPPLE_PROMPT = (
     "Use the reference video for motion, timing, camera movement, composition, and unchanged scene content, while "
     "consistently propagating the visual edit established in the first frame throughout the video."
+)
+# The CUDA level puts the first frame in at 0.7 for its first pass and 1.0 for its second. There is one pass here, and
+# 0.7 is the one measured on a Mac (#716): the clip opened on the picture and then followed the reference's camera.
+REFERENCE_FIRST_FRAME_STRENGTH = 0.7
+REFUSED_PLAIN_CLIP = (
+    "On a Mac this level follows a previz exported as a depth or clay pass, and this clip is not one: export the previz "
+    "as a pass, or use a card, where the depth is estimated."
 )
 
 
@@ -340,6 +347,95 @@ class LTX2MLXRippleEdit:
         return (InputImpl.VideoFromFile(str(output)),)
 
 
+def write_frames(frames, count: int, fps: float, path: Path, tools: Path) -> tuple[int, int]:
+    """The first `count` frames of an IMAGE batch, losslessly and one at a time, as they come: `ic-lora` sizes the guide."""
+    _, height, width, _ = frames.shape
+    encoder = subprocess.Popen(
+        [str(tools / "ffmpeg"), "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}",
+         "-r", f"{fps:g}", "-i", "-", "-c:v", "libx264", "-qp", "0", "-pix_fmt", "yuv444p", str(path)],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        for index in range(count):
+            encoder.stdin.write((frames[index, :, :, :3].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8).tobytes())
+    finally:
+        encoder.stdin.close()
+        encoder.wait()
+    if encoder.returncode != 0:
+        raise RuntimeError(f"The guide could not be written: ffmpeg exited {encoder.returncode}.")
+    return width, height
+
+
+class LTX2MLXReferenceVideo:
+    """A previz exported as a control pass (depth or clay) in; a clip with its framing, camera and motion out.
+
+    The pass has to arrive ready, as it does from 10sai Director: on a Mac nothing estimates depth from a plain clip,
+    because MoGe runs there on the CPU and took two minutes for 4 s even at its lowest level (#716).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                # Frames rather than a VIDEO, because the canvas sizes the pass first: half the clip, as `ic-lora` encodes it.
+                "guide": ("IMAGE",),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0}),
+                "lora_name": (folder_paths.get_filename_list("loras"),),
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "duration": ("INT", {"default": 4, "min": 1, "max": 4}),
+                "height": ("INT", {"default": 512, "min": 64, "max": 1920, "step": 64, "tooltip": "The shorter side."}),
+                # The name the companion reads as the level's guide strength.
+                "reference_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True}),
+                # What the companion reads as "the clip is the control". A plain clip is refused rather than followed:
+                # the union control would read its colours as a pass and nothing would say so.
+                "reference_is_control": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "first_frame": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    FUNCTION = "generate"
+    CATEGORY = "10sai/LTX-2.5 MLX"
+
+    def generate(self, guide, fps, lora_name, prompt, duration, height, reference_strength, seed, reference_is_control=True,
+                 first_frame=None):
+        if not reference_is_control:
+            raise RuntimeError(REFUSED_PLAIN_CLIP)
+        lora = folder_paths.get_full_path("loras", lora_name)
+        if not lora:
+            raise RuntimeError(f"{lora_name} is not installed: install the level again from the companion.")
+        model, python, tools = start()
+        temp, run = files_for_this_run()
+        guide_file = temp / f"{run}-guide.mp4"
+        output = temp / f"{run}.mp4"
+        log = temp / f"{run}.log"
+
+        frames = stretch.reference_frames(duration, fps, guide.shape[0])
+        guide_width, guide_height = write_frames(guide, frames, fps, guide_file, tools)
+        width, height = stretch.edit_size(guide_width, guide_height, height)
+        inputs = [guide_file]
+        picture = None
+        if first_frame is not None:
+            picture = temp / f"{run}.png"
+            fitted(Image.fromarray((first_frame[0].cpu().numpy() * 255.0).clip(0, 255).astype(np.uint8)), width, height).save(picture)
+            inputs.append(picture)
+
+        argv = [
+            *supervise.program(str(python), "ic-lora"),
+            *supervise.clip_arguments(str(model), prompt.strip(), frames, width, height, round(fps), seed, str(output)),
+            *supervise.reference_arguments(
+                lora, str(guide_file), reference_strength, str(picture) if picture else None, REFERENCE_FIRST_FRAME_STRENGTH
+            ),
+        ]
+        say(f"{frames} frames at {width}x{height}, {fps:g} fps, following a guide at {reference_strength:g}"
+            f"{', from a first frame' if picture else ''}. Log: {log}")
+        return run_clip(argv, python, tools, output, log, inputs)
+
+
 def prepare_ffmpeg(python: Path) -> Path:
     """`ltx-2-mlx` looks for `ffmpeg` on PATH and hard-codes libx264, which a Mac does not come with.
 
@@ -365,10 +461,12 @@ NODE_CLASS_MAPPINGS = {
     "LTX2MLXImageToVideo": LTX2MLXImageToVideo,
     "LTX2MLXAudioToVideo": LTX2MLXAudioToVideo,
     "LTX2MLXRippleEdit": LTX2MLXRippleEdit,
+    "LTX2MLXReferenceVideo": LTX2MLXReferenceVideo,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "LTX2MLXTextToVideo": "LTX-2.5 text to video (MLX)",
     "LTX2MLXImageToVideo": "LTX-2.5 image to video (MLX)",
     "LTX2MLXAudioToVideo": "LTX-2.5 audio to video (MLX)",
     "LTX2MLXRippleEdit": "LTX-2.5 Ripple edit from the first frame (MLX)",
+    "LTX2MLXReferenceVideo": "LTX-2.5 video that follows a reference (MLX)",
 }

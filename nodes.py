@@ -34,6 +34,10 @@ RIPPLE_PROMPT = (
 # The CUDA level puts the first frame in at 0.7 for its first pass and 1.0 for its second. There is one pass here, and
 # 0.7 is the one measured on a Mac (#716): the clip opened on the picture and then followed the reference's camera.
 REFERENCE_FIRST_FRAME_STRENGTH = 0.7
+REFUSED_PLAIN_CLIP = (
+    "On a Mac this level follows a previz exported as a depth or clay pass, and this clip is not one: export the previz "
+    "as a pass, or use a card, where the depth is estimated."
+)
 
 
 def model_dir() -> Path:
@@ -363,13 +367,17 @@ def write_frames(frames, count: int, fps: float, path: Path, tools: Path) -> tup
 
 
 class LTX2MLXReferenceVideo:
-    """A guide (a previz's depth, or a clip that already is one) in; a clip with its framing, camera and motion out."""
+    """A previz exported as a control pass (depth or clay) in; a clip with its framing, camera and motion out.
+
+    The pass has to arrive ready, as it does from 10sai Director: on a Mac nothing estimates depth from a plain clip,
+    because MoGe runs there on the CPU and took two minutes for 4 s even at its lowest level (#716).
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                # Frames rather than a VIDEO, because the guide is made in the canvas: MoGe's depth of the clip, or the clip itself.
+                # Frames rather than a VIDEO, because the canvas sizes the pass first: half the clip, as `ic-lora` encodes it.
                 "guide": ("IMAGE",),
                 "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0}),
                 "lora_name": (folder_paths.get_filename_list("loras"),),
@@ -379,6 +387,9 @@ class LTX2MLXReferenceVideo:
                 # The name the companion reads as the level's guide strength.
                 "reference_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True}),
+                # What the companion reads as "the clip is the control". A plain clip is refused rather than followed:
+                # the union control would read its colours as a pass and nothing would say so.
+                "reference_is_control": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "first_frame": ("IMAGE",),
@@ -390,7 +401,10 @@ class LTX2MLXReferenceVideo:
     FUNCTION = "generate"
     CATEGORY = "10sai/LTX-2.5 MLX"
 
-    def generate(self, guide, fps, lora_name, prompt, duration, height, reference_strength, seed, first_frame=None):
+    def generate(self, guide, fps, lora_name, prompt, duration, height, reference_strength, seed, reference_is_control=True,
+                 first_frame=None):
+        if not reference_is_control:
+            raise RuntimeError(REFUSED_PLAIN_CLIP)
         lora = folder_paths.get_full_path("loras", lora_name)
         if not lora:
             raise RuntimeError(f"{lora_name} is not installed: install the level again from the companion.")

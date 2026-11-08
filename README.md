@@ -7,9 +7,9 @@ ComfyUI nodes that make LTX-2.5 clips with [`ltx-2-mlx`](https://github.com/dgra
 - **From text** and **from a picture** (`generate`, the second with `--image <file> 0 1.0`): the clip comes with its own sound.
 - **A clip edited from its first frame** (`ic-lora --single-stage` with the Ripple LoRA): the edit made on the first frame is
   carried through the clip, which keeps its motion, camera and timing. It comes back without sound, as the CUDA level does.
-- **A clip that follows a reference** (`ic-lora --single-stage` with the IC-LoRA union control): a guide, usually MoGe's depth
-  of a previz made in the canvas, gives the framing, camera and motion, and a picture can give the first frame. It comes
-  with its own sound, as the CUDA level does.
+- **A clip that follows a previz** (`ic-lora --single-stage` with the IC-LoRA union control): a previz exported as a depth or
+  clay pass gives the framing, camera and motion, and a picture can give the first frame. It comes with its own sound, as
+  the CUDA level does. A clip that is not a pass is refused: on a Mac nothing estimates its depth.
 
 Written for [10sai](https://github.com/10sai-studio/10sai), which installs it, and it works on any ComfyUI that does the same.
 Width and height are snapped to multiples of 64, and the length to LTX's 8n+1 frames.
@@ -22,7 +22,7 @@ Width and height are snapped to multiples of 64, and the length to LTX's 8n+1 fr
 | From text | 4, 6, 6 s at 832x512 | 173, 244, 244 s | 26% |
 | From a picture | 4, 6, 6 s at 832x512 | 183, 254, 254 s | 26% |
 | A Ripple edit | 4 s at 832x512 | 631, 638, 622 s | 13-15% |
-| Following a reference | 4 s at 832x512 | 449 s, 460 s after 121 s of depth | 21-22% |
+| Following a previz pass | 4 s at 896x512 | 482 s | 22% |
 
 Each run started from 70 to 76% available, and swap grew by 0.3 GB at most, 2.0 GB for an edit. With the int4 pack the same runs were about
 10% faster and went down to 15-23%. Nothing larger than 832x512, longer than 6 s or started below 62% has been run.
